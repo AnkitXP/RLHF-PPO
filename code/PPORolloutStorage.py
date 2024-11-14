@@ -23,11 +23,12 @@ class PPORLBatch:
     rewards: TensorType["batch_size", "response_size"]
 
 
-class PPORolloutStorage():
+class PPORolloutStorage:
 
-    def __init__(self):
+    def __init__(self, tokenizer):
         super().__init__()
-        
+        self.pad_token_id = tokenizer.pad_token_id
+        self.history: Iterable[PPORLElement] = [None]        
 
     def push(self, exps: Iterable[PPORLElement]):
         self.history += exps

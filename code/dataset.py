@@ -1,7 +1,7 @@
 from datasets import load_dataset
 
 class IMDBDataset:
-    def __init__(self, tokenizer, max_length=16):
+    def __init__(self, tokenizer, max_length=30):
         self.tokenizer = tokenizer
         self.max_length = max_length
 
@@ -10,8 +10,7 @@ class IMDBDataset:
         dataset = dataset.rename_columns({'text': 'review'})
         dataset = dataset.filter(lambda x: len(x["review"])>200, batched=False)
         dataset = dataset.map(self.tokenize_data, batched=True)
-        dataset.set_format(type='torch')
-        return dataset
+        return dataset['input_ids']
 
     def tokenize_data(self, data):
         return self.tokenizer(

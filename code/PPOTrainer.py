@@ -5,15 +5,17 @@ import torch.nn.functional as F
 import numpy as np
 from PPORolloutStorage import PPORolloutStorage,PPORLElement
 
+from config import config
+
 class PPOTrainer:
-    def __init__(self, policy_model, reward_model, dataset, tokenizer, config):
+    def __init__(self, policy_model, reference_model, reward_model, dataset):
         self.policy_model = policy_model
+        self.reference_model = reference_model
         self.reward_model = reward_model
-        self.dataset = dataset
-        self.tokenizer = tokenizer
+        self.dataset = torch.tensor(dataset)
+        self.tokenizer = policy_model.tokenizer
         self.optimizer = optim.AdamW(self.policy_model.parameters(), lr=config.lr)
-        self.config = config
-        self.rollout_store = PPORolloutStorage()
+        self.rollout_store = PPORolloutStorage(self.tokenizer)
 
     def train_step(self):
         """
@@ -21,21 +23,24 @@ class PPOTrainer:
         """
         #step 1: generate and store rollouts
 
+        torch.cuda.empty_cache()
+
         self.rollout_store.clear_history()
         rollouts, score = self.generate_experience()
         self.rollout_store.push(rollouts)
 
-        train_dataloader = self.rollout_store.create_loader(self.config.batch_size, shuffle=True)
+        train_dataloader = self.rollout_store.create_loader(config.batch_size, shuffle=True)
 
         #step 2: loss calculation and optimization
 
+        self.policy_model.train()
+        self.optimizer.zero_grad()
+
         for batch in train_dataloader:
-            for _ in range(self.config.ppo_epochs):
+            for _ in range(config.ppo_epochs):
                 loss, reward = self.loss_fn(batch)
                 loss.backward()
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-
+                self.optimizer.step()                
         return score
     
     def generate_experience(self):
@@ -45,22 +50,21 @@ class PPOTrainer:
 
         all_rollouts = []
         generate_kwargs = dict(
-            self.config.gen_kwargs,
+            config.gen_kwargs,
             eos_token_id = self.tokenizer.eos_token_id,
             pad_token_id = self.tokenizer.pad_token_id
             )
         
         dataset_idx = np.arange(len(self.dataset))
         
-        while len(all_rollouts) < self.config.num_rollouts:
+        while len(all_rollouts) < config.num_rollouts:
 
-            if len(dataset_idx) >= self.config.prompt_batch_size:
-                picked_indices = np.random.choice(np.arange(len(dataset_idx)),
-                                              self.config.prompt_batch_size,
+            if len(dataset_idx) >= config.prompt_batch_size:
+                picked_indices = np.random.choice(dataset_idx,
+                                              config.prompt_batch_size,
                                               replace=False)
-                samples = self.dataset['input_ids'][dataset_idx[picked_indices]]
+                input_ids = torch.tensor(self.dataset[picked_indices])
                 dataset_idx = np.delete(dataset_idx, picked_indices)
-                input_ids = torch.tensor(samples)
                 attention_mask = torch.ones_like(input_ids)
                 batch = {'input_ids': input_ids, 'attention_mask': attention_mask}
 
@@ -73,6 +77,8 @@ class PPOTrainer:
             response_tensors = trajectories[:, query_tensors.shape[1]:]
             attention_mask = trajectories.not_equal(self.tokenizer.pad_token_id).long()
 
+            
+
             with torch.no_grad():
                 logits, values = self.policy_model(
                     trajectories,
@@ -82,6 +88,7 @@ class PPOTrainer:
                     trajectories,
                     attention_mask=attention_mask,
                 )
+
             logprobs = self.logprobs_from_logits(logits[:, :-1, :], trajectories[:, 1:])
             ref_logprobs = self.logprobs_from_logits(ref_logits[:, :-1, :], trajectories[:, 1:])
             n_trajectories = trajectories.shape[0]
@@ -92,10 +99,11 @@ class PPOTrainer:
             truncated_values = [values[i, start : ends[i]] for i in range(n_trajectories)]
             truncated_logprobs = [logprobs[i, start : ends[i]] for i in range(n_trajectories)]
 
-            texts = self.tokenizer.batch_decode(trajectories, skip_special_tokens=True)
-            scores = self.configreward_fn(texts)
-            rewards = -self.config.kl_coef * (logprobs - ref_logprobs)
+            texts = self.tokenizer.batch_decode(trajectories, skip_special_tokens=True)             
+            scores = self.reward_model(texts)
+            rewards = -config.kl_coef * (logprobs - ref_logprobs)
             all_rewards = [None] * n_trajectories
+            
             for i in range(n_trajectories):
                 rs = rewards[i][start : ends[i]]
                 rs[-1] = scores[i]
@@ -111,6 +119,7 @@ class PPOTrainer:
                 )
                 for i in range(n_trajectories)
             ]
+            
             all_rollouts += new_rollout
 
         score = torch.tensor(scores).mean().detach().cpu().item()
@@ -121,13 +130,6 @@ class PPOTrainer:
         logprobs = F.log_softmax(logits, dim=-1)
         logprobs_labels = torch.gather(logprobs, dim=-1, index=labels.unsqueeze(-1))
         return logprobs_labels.squeeze(-1)
-    
-    def reward_fn(self, samples):
-        ins = self.tokenizer(samples, padding=True, truncation=True, max_length=self.config.seq_length, return_tensors='pt')
-        logits = self.reward_model(**ins.to(self.reward_model.device)).logits
-        temperature = 0.3
-        sentiments = torch.sigmoid(logits*temperature)[:,0].detach().cpu().tolist()
-        return sentiments
     
     def loss_fn(self, mini_batch):
         query_tensors = mini_batch.query_tensors
@@ -171,8 +173,8 @@ class PPOTrainer:
     def ppo_loss(self, logprobs, values, old_logprobs, old_values, advantages, returns, mask):
         values_clipped = torch.clamp(
             values,
-            old_values - self.config.cliprange_value,
-            old_values + self.config.cliprange_value,
+            old_values - config.cliprange_value,
+            old_values + config.cliprange_value,
         )
         n = mask.sum()
         vf_loss1 = (values - returns) ** 2
@@ -181,10 +183,10 @@ class PPOTrainer:
         log_ratio = (logprobs - old_logprobs) * mask
         ratio = torch.exp(log_ratio)
         pg_loss1 = -advantages * ratio
-        pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - self.config.cliprange, 1.0 + self.config.cliprange)
+        pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - config.cliprange, 1.0 + config.cliprange)
         pg_loss = torch.sum(torch.max(pg_loss1, pg_loss2) * mask) / n
         pg_clipfrac = torch.sum((pg_loss2 > pg_loss1).float() * mask) / n
-        loss = pg_loss + self.config.vf_coef * vf_loss
+        loss = pg_loss + config.vf_coef * vf_loss
         return loss
     
     def gae(self, values, rewards):
@@ -193,9 +195,12 @@ class PPOTrainer:
         last_value = 0
         with torch.no_grad():
             for t in reversed(range(rewards.shape[1])):
-                delta = rewards[:, t] + self.config.gamma * last_value - values[:, t]
-                last_advantage = delta + self.config.gamma * self.config.lam * last_advantage
+                delta = rewards[:, t] + config.gamma * last_value - values[:, t]
+                last_advantage = delta + config.gamma * config.lam * last_advantage
                 advantages[:, t] = last_advantage
                 last_value = values[:, t]
             returns = advantages + values
         return advantages, returns
+
+    def save_trained_model(self, save_dir, model_name):
+        self.policy_model.save_model(save_dir, model_name)

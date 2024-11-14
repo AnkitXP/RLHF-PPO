@@ -1,5 +1,3 @@
-from transformers import AutoTokenizer, set_seed
-
 from model import RewardModel, PolicyModel
 from config import config
 from PPOTrainer import PPOTrainer
@@ -12,35 +10,30 @@ def train():
     Helper method for training the policy model
     """
     
-    set_seed(42)
-
-    # Initialize tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(config.policy_model_name)
-    tokenizer.pad_token = tokenizer.eos_token
-    
     # Initialize models
     policy_model = PolicyModel(config, trainable=True)
+    reference_model = PolicyModel(config, trainable=False)
     reward_model = RewardModel(config)
 
     # Load data
-    IMDB = IMDBDataset(tokenizer)
+    IMDB = IMDBDataset(policy_model.tokenizer)
     dataset = IMDB.load_data(split='train')
 
-    trainer = PPOTrainer(policy_model, reward_model, dataset, tokenizer, config)
+    trainer = PPOTrainer(policy_model, reference_model, reward_model, dataset)
 
-    total_steps = (config.num_rollouts // config.batch_size) * config.ppo_epochs* config.epochs
-    tbar = tqdm(initial=0, total=total_steps)
+    tbar = tqdm(initial=0, total=config.epochs)
     all_scores = []
 
     for epoch in range(config.epochs): 
         score = trainer.train_step()
         all_scores.append(score)
-        tbar.set_description(f"| score: {score:.3f} |")
-        print(f"Epoch {epoch + 1} completed")
+        tbar.set_description(f"| Epoch: {epoch+1}, Score: {score:.3f} |")
+        tbar.update()
 
     plt.plot(all_scores)
-    plt.savefig(config.save_dir)
+    plt.savefig(config.save_dir+"Rewards.png")
 
-    model_name = "gpt2_policy_model_epoch_" + str(config.ppo_epochs)
-    policy_model.save_model(config.save_dir, model_name)
+    model_name = 'GPT2-RLHF-PPO-EPOCH-'+ str(config.epochs)
+    PPOTrainer.save_trained_model(config.save_dir, model_name=model_name)
+    
     print("Training complete!")

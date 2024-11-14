@@ -1,4 +1,4 @@
-from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification
+from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
 import torch
 import torch.nn as nn
 import os
@@ -12,6 +12,8 @@ class PolicyModel(nn.Module):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.trainable = trainable
         self.model = AutoModelForCausalLM.from_pretrained(config.policy_model_name, torch_dtype = torch.bfloat16).to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.policy_model_name)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
 
         if not self.trainable:
             self.model = self.model.eval()
@@ -91,12 +93,18 @@ class RewardModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.model = AutoModelForSequenceClassification.from_pretrained(config.reward_model_name, torch_dtype = torch.bfloat16).to(self.device).eval()
+        self.model = AutoModelForSequenceClassification.from_pretrained(config.reward_model_name, torch_dtype = torch.bfloat16).to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.reward_model_name)
 
-    def forward(self, input_ids, attention_mask=None):
-        logits = self.model(
-            input_ids,
-            attention_mask=attention_mask).logits
-        return logits
+    def forward(self, texts):
+        
+        input_ids = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            predictions = self.model(**input_ids).logits[:, 1:]
+        
+        temperature = 0.3
+        sentiments = torch.sigmoid(predictions*temperature).squeeze()
+
+        return sentiments
 
     
