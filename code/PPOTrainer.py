@@ -3,6 +3,9 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 import numpy as np
+from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+
 from PPORolloutStorage import PPORolloutStorage,PPORLElement
 
 from config import config
@@ -15,33 +18,55 @@ class PPOTrainer:
         self.dataset = torch.tensor(dataset)
         self.tokenizer = policy_model.tokenizer
         self.optimizer = optim.AdamW(self.policy_model.parameters(), lr=config.lr)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=config.epochs)
         self.rollout_store = PPORolloutStorage(self.tokenizer)
+        self.writer = SummaryWriter()
 
-    def train_step(self):
+    def train(self):
         """
         Perform rollouts generation and update the policy model using the custom loss function
         """
         #step 1: generate and store rollouts
 
-        torch.cuda.empty_cache()
+        pbar = tqdm(total=config.epoch, desc="Training Epochs")
 
-        self.rollout_store.clear_history()
-        rollouts, score = self.generate_experience()
-        self.rollout_store.push(rollouts)
+        for epoch in range(config.epochs):
 
-        train_dataloader = self.rollout_store.create_loader(config.batch_size, shuffle=True)
+            torch.cuda.empty_cache()
 
-        #step 2: loss calculation and optimization
+            self.rollout_store.clear_history()
+            rollouts, score = self.generate_experience()
+            self.rollout_store.push(rollouts)
 
-        self.policy_model.train()
-        self.optimizer.zero_grad()
+            train_dataloader = self.rollout_store.create_loader(config.batch_size, shuffle=True)
 
-        for batch in train_dataloader:
-            for _ in range(config.ppo_epochs):
-                loss, reward = self.loss_fn(batch)
-                loss.backward()
-                self.optimizer.step()                
-        return score
+            #step 2: loss calculation and optimization
+
+            self.policy_model.model.train()
+            self.optimizer.zero_grad()
+
+            for batch_idx, batch in enumerate(train_dataloader):
+                for _ in range(config.ppo_epochs):
+                    loss, reward = self.loss_fn(batch)
+                    loss.backward()
+                    self.optimizer.step()
+
+                # Log to TensorBoard
+                global_step = epoch * len(train_dataloader) + batch_idx
+                self.writer.add_scalar('Loss/train', loss.item(), global_step)
+                self.writer.add_scalar('Reward/train', reward, global_step)
+                self.writer.add_scalar('Score/train', score, global_step)
+
+            pbar.update(1)
+            self.scheduler.step()
+            pbar.set_postfix({'loss': loss.item(), 'reward': reward, 'score': score})
+
+        pbar.close()
+        self.writer.close()                
+        
+        save_dir = config.save_dir
+        model_name = config.policy_model_name + '-RLHF-PPO-EPS-' + config.epochs
+        self.policy_model.save_model(save_dir, model_name)
     
     def generate_experience(self):
         """
@@ -71,25 +96,23 @@ class PPOTrainer:
             query_tensors = batch['input_ids'].to(self.policy_model.device)
             trajectories = self.policy_model.generate(
                 query_tensors,
-                attention_mask=batch['attention_mask'].to(self.policy_model.device),
+                attention_mask = batch['attention_mask'].to(self.policy_model.device),
                 **generate_kwargs
             )
             response_tensors = trajectories[:, query_tensors.shape[1]:]
             attention_mask = trajectories.not_equal(self.tokenizer.pad_token_id).long()
 
-            
-
             with torch.no_grad():
                 logits, values = self.policy_model(
                     trajectories,
-                    attention_mask=attention_mask,
+                    attention_mask = attention_mask,
                 )
                 ref_logits = self.reference_model(
                     trajectories,
-                    attention_mask=attention_mask,
+                    attention_mask = attention_mask,
                 )
 
-            logprobs = self.logprobs_from_logits(logits[:, :-1, :], trajectories[:, 1:])
+            logprobs = self.logprobs_from_logits(logits[:, :-1, :], trajectories[:, 1:]) 
             ref_logprobs = self.logprobs_from_logits(ref_logits[:, :-1, :], trajectories[:, 1:])
             n_trajectories = trajectories.shape[0]
             values = values[:, :-1]
@@ -103,6 +126,8 @@ class PPOTrainer:
             scores = self.reward_model(texts)
             rewards = -config.kl_coef * (logprobs - ref_logprobs)
             all_rewards = [None] * n_trajectories
+
+            del texts, ref_logprobs, logits, ref_logits, trajectories
             
             for i in range(n_trajectories):
                 rs = rewards[i][start : ends[i]]
@@ -111,14 +136,16 @@ class PPOTrainer:
 
             new_rollout = [
                 PPORLElement(
-                    query_tensor=query_tensors[i],
-                    response_tensor=response_tensors[i],
-                    logprobs=truncated_logprobs[i],
-                    values=truncated_values[i],
-                    rewards=all_rewards[i],
+                    query_tensor = query_tensors[i],
+                    response_tensor = response_tensors[i],
+                    logprobs = truncated_logprobs[i],
+                    values = truncated_values[i],
+                    rewards = all_rewards[i],
                 )
                 for i in range(n_trajectories)
             ]
+
+            del query_tensors, response_tensors, truncated_logprobs, truncated_values, all_rewards
             
             all_rollouts += new_rollout
 

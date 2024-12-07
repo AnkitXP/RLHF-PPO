@@ -29,33 +29,29 @@ class PolicyModel(nn.Module):
         self.logit_head = self.model.get_output_embeddings()
     
     def forward(self, input_ids, attention_mask=None):
+        
         outputs = self.model(input_ids,
                              attention_mask=attention_mask,
                              output_hidden_states=True)
         last_hidden_state = outputs.hidden_states[-1]
         lm_logits = self.logit_head(last_hidden_state)
+        
         if self.trainable:
             value = self.value_head(last_hidden_state).squeeze(-1)
             return lm_logits, value
         else:
             return lm_logits
         
-    def generate(self, input_ids, **x):
-        return self.model.generate(input_ids, **x)
+    def generate(self, input_ids, **gen_kwargs):
+        return self.model.generate(input_ids, **gen_kwargs)
     
     def save_model(self, save_dir, model_name):
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        
-        save_path = os.path.join(save_dir, model_name)
-
-        torch.save(self.model.state_dict(), save_path)
-        print(f"Model saved to {save_path}")
-
-    def load_model(self, save_dir, model_name):
-        save_path = os.path.join(save_dir, model_name)
-        self.model.load_state_dict(torch.load(save_path))
-        print(f"Model loaded from {save_path}")
+        parent_dir = os.path.join(os.getcwd(), os.pardir)
+        model_dir = os.path.join(save_dir, model_name)
+        save_dir = os.path.join(parent_dir, model_dir)
+        self.model.save_pretrained(save_dir)
+        self.tokenizer.save_pretrained(save_dir)
+        print(f'Model and Tokenizer saved to {save_dir}')
     
         
 class RewardModel(nn.Module):
