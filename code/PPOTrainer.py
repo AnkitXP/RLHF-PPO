@@ -81,17 +81,20 @@ class PPOTrainer:
             )
         
         dataset_idx = np.arange(len(self.dataset))
-        
+
+            
         while len(all_rollouts) < config.num_rollouts:
 
             if len(dataset_idx) >= config.prompt_batch_size:
-                picked_indices = np.random.choice(dataset_idx,
-                                              config.prompt_batch_size,
-                                              replace=False)
-                input_ids = torch.tensor(self.dataset[picked_indices])
-                dataset_idx = np.delete(dataset_idx, picked_indices)
-                attention_mask = torch.ones_like(input_ids)
-                batch = {'input_ids': input_ids, 'attention_mask': attention_mask}
+                picked_indices = np.random.choice(dataset_idx, config.prompt_batch_size, replace=False)
+            else:
+                # Handle case where there are fewer indices than `prompt_batch_size`
+                picked_indices = np.random.choice(dataset_idx, len(dataset_idx), replace=False)
+            
+            input_ids = torch.tensor(self.dataset[picked_indices])
+            dataset_idx = np.delete(dataset_idx, np.isin(dataset_idx, picked_indices).nonzero()[0])
+            attention_mask = torch.ones_like(input_ids)
+            batch = {'input_ids': input_ids, 'attention_mask': attention_mask}
 
             query_tensors = batch['input_ids'].to(self.policy_model.device)
             trajectories = self.policy_model.generate(
