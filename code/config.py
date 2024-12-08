@@ -5,21 +5,21 @@ class dotdict(dict):
     __delattr__ = dict.__delitem__
 
 config = dotdict({
-        'policy_model_name': 'lvwerra/gpt2-imdb',
+        'policy_model_name': 'EKKam/opt-1.5b_imdb_sft',
         'reward_model_name': 'siebert/sentiment-roberta-large-english',
         'save_dir':'/saved_models/',
-        'seq_length': 8,
-        'batch_size': 256,
-        'lr': 1.41e-5,
-        'prompt_size': 16,
+        'seq_length': 1024,
+        'batch_size': 64,
+        'lr': 6e-5,
+        'prompt_size': 30,
         'prompt_batch_size': 128,
-        'num_rollouts': 64,
-        'epochs': 20000,
+        'num_rollouts': 128,
+        'epochs': 10000,
         'ppo_epochs': 4,
         'gen_kwargs': {
-            'max_new_tokens': 40,
-            'top_k': 50,
-            'top_p': 0.95,
+            'max_new_tokens': 128,
+            'top_k': 0.0,
+            'top_p': 1.0,
             'do_sample': True,
             'temperature': 0.7
         },
